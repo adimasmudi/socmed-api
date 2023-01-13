@@ -2,14 +2,13 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"socmed-api/configs"
 	"socmed-api/models"
 	"socmed-api/responses"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/gofiber/fiber/v2"
 	"go.mongodb.org/mongo-driver/bson"
@@ -35,11 +34,19 @@ func Register(c *fiber.Ctx) error {
 		return c.Status(http.StatusBadRequest).JSON(responses.PostResponse{Status: http.StatusBadRequest, Message: "error", Data: &fiber.Map{"data": validationError.Error()}})
 	}
 
+	count, err := userCollection.CountDocuments(ctx, bson.M{"username": user.Username, "email": user.Email})
+	if count >= 1 {
+		return c.Status(http.StatusBadRequest).JSON(responses.PostResponse{Status: http.StatusBadRequest, Message: "email or username already exist", Data: &fiber.Map{"data": count}})
+	}
+
+	// hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+
 	newUser := models.User{
 		Id:       primitive.NewObjectID(),
 		Username: user.Username,
 		Email:    user.Email,
-		Password: user.Password,
+		Password: string(hashedPassword),
 	}
 
 	result, err := userCollection.InsertOne(ctx, newUser)
@@ -59,33 +66,30 @@ func Register(c *fiber.Ctx) error {
 func Login(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	var user models.User
-
 	defer cancel()
+	payload := struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}{}
 
-	fmt.Println(user.Username, user.Password)
+	if err := c.BodyParser(&payload); err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(responses.UserResponse{Status: http.StatusInternalServerError, Message: "error", Data: &fiber.Map{"data": err.Error()}})
+	}
 
-	err := userCollection.FindOne(ctx, bson.M{"username": user.Username, "password": user.Password}).Decode(&user)
+	err := userCollection.FindOne(ctx, bson.M{"email": payload.Email}).Decode(&user)
 
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(responses.PostResponse{Status: http.StatusInternalServerError, Message: "error", Data: &fiber.Map{"data": err.Error()}})
 	}
 
-	// Create the Claims
-	claims := jwt.MapClaims{
-		"username": user.Username,
-		"exp":      time.Now().Add(time.Hour * 72).Unix(),
+	error := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(payload.Password))
+
+	if error != nil {
+		return c.Status(http.StatusInternalServerError).JSON(responses.PostResponse{Status: http.StatusInternalServerError, Message: "Wrong Password", Data: &fiber.Map{"data": error.Error()}})
 	}
 
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return c.Status(http.StatusOK).JSON(responses.PostResponse{Status: http.StatusOK, Message: "success, ada", Data: &fiber.Map{"data": user}})
 
-	// Generate encoded token and send it as response.
-	t, err := token.SignedString([]byte("secret"))
-	if err != nil {
-		return c.Status(http.StatusInternalServerError).JSON(responses.PostResponse{Status: http.StatusInternalServerError, Message: "error", Data: &fiber.Map{"data": err.Error()}})
-	}
-
-	return c.Status(http.StatusOK).JSON(responses.PostResponse{Status: http.StatusOK, Message: "success", Data: &fiber.Map{"data": user, "token": t}})
 }
 
 // func Logout() {
